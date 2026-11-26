@@ -1,0 +1,823 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<title>桉桉宝宝圣诞节快乐</title>
+<link rel="preconnect" href="https://miaoda.feishu.cn" crossorigin>
+<link rel="stylesheet" href="https://miaoda.feishu.cn/fonts/css2?family=Ma+Shan+Zheng&display=swap">
+<style>
+  html, body {
+    margin: 0; padding: 0;
+    width: 100%; height: 100%;
+    background: #000;
+    overflow: hidden;
+  }
+  #stage {
+    position: fixed;
+    inset: 0;
+    background: #000;
+  }
+  #stage canvas {
+    position: absolute;
+    left: 0; top: 0;
+    width: 100%; height: 100%;
+    display: block;
+  }
+  /* 竖屏时场景上下边界渐隐，避免出现硬裁切边 */
+  /* 右下角音乐开关（只有图标，无文字） */
+  #mbtn {
+    position: absolute;
+    left: 18px;
+    bottom: 18px;
+    width: 42px;
+    height: 42px;
+    padding: 0;
+    border: 1px solid rgba(150, 190, 255, 0.35);
+    border-radius: 50%;
+    background: rgba(14, 20, 34, 0.45);
+    color: #d3e4ff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    z-index: 30;
+    opacity: 0.62;
+    -webkit-tap-highlight-color: transparent;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    transition: opacity .3s ease, border-color .3s ease, transform .2s ease;
+  }
+  #mbtn:hover { opacity: 0.95; transform: scale(1.05); }
+  #mbtn.playing { opacity: 0.9; border-color: rgba(190, 220, 255, 0.7); }
+  #mbtn svg { display: block; }
+  #mbtn .slash {
+    position: absolute;
+    width: 23px;
+    height: 1.8px;
+    background: rgba(211, 228, 255, 0.9);
+    transform: rotate(-45deg);
+    transition: opacity .25s ease;
+  }
+  #mbtn.playing .slash { opacity: 0; }
+  #veil {
+    position: absolute;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity .35s ease;
+  }
+  #stage { opacity: 0; transition: opacity 1.2s ease-out; }
+  #stage.on { opacity: 1; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <canvas id="gl"></canvas>
+  <canvas id="fx"></canvas>
+  <div id="veil"></div>
+  <button id="mbtn" type="button" aria-label="播放圣诞音乐">
+    <svg viewBox="0 0 24 24" width="21" height="21" fill="none"
+         stroke="currentColor" stroke-width="1.9" stroke-linecap="round">
+      <circle cx="8" cy="17" r="3.1"/>
+      <path d="M11.1 17V5.6"/>
+      <path d="M11.1 6.2c3 .2 5.4 1.5 5.4 4.1"/>
+    </svg>
+    <i class="slash"></i>
+  </button>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  /* ================== 场景参数（与 tree.py 完全一致） ================== */
+  var WIDTH = 1600, HEIGHT = 900;      // 设计分辨率
+  var TAU = Math.PI * 2;
+
+  var TREE_POINTS   = 50000;           // 树体：70% 螺旋灯带 + 30% 填充
+  var GROUND_POINTS = 4000;            // 地面光环
+  var STAR_POINTS   = 1200;            // 空中小亮点
+  var HEART_POINTS  = 1000;            // 树顶爱心
+  var SNOW2D_POINTS = 10;              // 前景 2D 大雪花
+
+  var CAM_DIST    = 13;
+  var CAM_HEIGHT  = 6.0;
+  var PITCH       = -0.25;             // 负角度 = 俯视
+  var TREE_HEIGHT = 12.0;
+
+  var GREETING = '桉桉宝宝圣诞节快乐';
+
+  /* ================== 随机工具 ================== */
+  function rnd(a, b) { return a + Math.random() * (b - a); }
+  function randInt(a, b) { return a + Math.floor(Math.random() * (b - a + 1)); }
+  function gauss(mu, sigma) {
+    var u = 1 - Math.random(), v = Math.random();
+    return mu + sigma * Math.sqrt(-2 * Math.log(u)) * Math.cos(TAU * v);
+  }
+
+  /* ================== 粒子数据生成 ================== */
+  var TOTAL = TREE_POINTS + GROUND_POINTS + STAR_POINTS + HEART_POINTS;
+  var pos = new Float32Array(TOTAL * 3);
+  var col = new Uint8Array(TOTAL * 3);
+  var n = 0;
+
+  function push(x, y, z, r, g, b) {
+    var i3 = n * 3;
+    pos[i3] = x; pos[i3 + 1] = y; pos[i3 + 2] = z;
+    col[i3] = r; col[i3 + 1] = g; col[i3 + 2] = b;
+    n++;
+  }
+
+  // 树体：螺旋灯带 + 蓬松填充
+  function genTree() {
+    var loops = 9;
+    var spiralN = Math.floor(TREE_POINTS * 0.7);
+
+    for (var k = 0; k < spiralN; k++) {
+      var u = Math.random();
+      var h = Math.pow(u, 1.6);
+      var y = TREE_HEIGHT * h + 0.2;
+
+      var baseR = Math.pow(1 - h, 1.1) * 3.2;
+      var branchWave = Math.max(0, Math.sin((h * 5.8 + 0.15) * TAU));
+      baseR *= 1 + 0.65 * branchWave;
+
+      var angle = u * loops * TAU + rnd(-0.22, 0.22);
+      var r = baseR * rnd(0.85, 1.08);
+
+      var midBoost = Math.max(0.15, 1 - Math.abs(h - 0.55) * 1.5);
+      var baseG = 155 + Math.floor(90 * midBoost);
+      var baseB = 185 + Math.floor(70 * midBoost);
+
+      var cr = 255;
+      var cg = Math.min(255, baseG + randInt(-15, 20));
+      var cb = Math.min(255, baseB + randInt(-15, 35));
+
+      if (Math.random() < 0.08) {          // 点缀更亮的小灯
+        cg = 255 - randInt(0, 35);
+        cb = 230 + randInt(0, 25);
+      }
+      push(Math.cos(angle) * r, y, Math.sin(angle) * r, cr, cg, cb);
+    }
+
+    var fillN = TREE_POINTS - spiralN;
+    for (var j = 0; j < fillN; j++) {
+      var h2 = Math.pow(Math.random(), 1.9);
+      var y2 = TREE_HEIGHT * h2 + 0.2 + rnd(-0.08, 0.08);
+
+      var baseR2 = Math.pow(1 - h2, 1.1) * 4.3;
+      var bw2 = Math.max(0, Math.sin((h2 * 5.8 + 0.15) * TAU));
+      baseR2 *= 1 + 0.65 * bw2;
+
+      var r2 = baseR2 * Math.sqrt(Math.random());
+      var ang2 = Math.random() * TAU;
+
+      push(
+        Math.cos(ang2) * r2 + rnd(-0.08, 0.08),
+        y2,
+        Math.sin(ang2) * r2 + rnd(-0.08, 0.08),
+        255, randInt(165, 225), randInt(190, 250)
+      );
+    }
+  }
+
+  // 地面光环（法阵盘子）
+  function genGround() {
+    var rings = [4.6, 6.0, 7.4, 8.8, 10.2, 11.4];
+    for (var k = 0; k < GROUND_POINTS; k++) {
+      var ring = rings[Math.floor(Math.random() * rings.length)];
+      var r = gauss(ring, 0.3);
+      var theta = Math.random() * TAU;
+      var c = Math.random() < 0.15 ? randInt(235, 255) : randInt(190, 235);
+      push(Math.cos(theta) * r, -0.25, Math.sin(theta) * r, c, c, 255);
+    }
+  }
+
+  // 空中 3D 小亮点
+  function genStars() {
+    for (var k = 0; k < STAR_POINTS; k++) {
+      var base = randInt(215, 255);
+      push(rnd(-18, 18), rnd(3, 18), rnd(-18, 18), base, base, 255);
+    }
+  }
+
+  // 树顶 3D 爱心（心形隐式方程采样 + 薄厚度）
+  function genHeart() {
+    var scale = 0.9;
+    var topY = TREE_HEIGHT + 0.05;
+    var made = 0;
+    while (made < HEART_POINTS) {
+      var x = rnd(-1.3, 1.3);
+      var y = rnd(-1.4, 1.4);
+      if (Math.pow(x * x + y * y - 1, 3) - x * x * (y * y * y) <= 0) {
+        var dist = Math.sqrt(x * x + y * y);
+        var factor = Math.max(0.35, 1.15 - 0.5 * dist);
+        var g = Math.max(120, Math.min(255, Math.floor(130 * factor + 80)));
+        var b = Math.max(120, Math.min(255, Math.floor(190 * factor + 70)));
+        push(x * scale * 0.8, topY + (y + 1) * scale * 0.5, rnd(-0.18, 0.18), 255, g, b);
+        made++;
+      }
+    }
+  }
+
+  genTree();
+  genGround();
+  genStars();
+  genHeart();
+
+  /* ================== WebGL ================== */
+  var DPR_CAP = 2;
+  var glCanvas = document.getElementById('gl');
+  var fxCanvas = document.getElementById('fx');
+  var gl = glCanvas.getContext('webgl', {
+    alpha: false, antialias: false, depth: true, stencil: false,
+    premultipliedAlpha: false, preserveDrawingBuffer: false
+  }) || glCanvas.getContext('experimental-webgl');
+
+  var usingGL = !!gl;
+
+  var VS = [
+    'precision highp float;',
+    'attribute vec3 aPos;',
+    'attribute vec3 aColor;',
+    'uniform float uCosA, uSinA, uCosP, uSinP;',
+    'uniform float uCamDist, uCamHeight, uW, uH, uPS;',
+    'varying vec3 vColor;',
+    'void main(){',
+    '  float xz = aPos.x * uCosA - aPos.z * uSinA;',
+    '  float zz = aPos.x * uSinA + aPos.z * uCosA;',
+    '  float yp = aPos.y * uCosP - zz * uSinP - uCamHeight;',
+    '  float zp = aPos.y * uSinP + zz * uCosP + uCamDist;',
+    '  if (zp <= 0.1) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 0.0; return; }',
+    '  float f = (uH * 0.63) / zp;',
+    '  float s = max(1.0, floor(3.6 - zp * 0.13));',
+    '  gl_PointSize = s * 2.0 * uPS;',
+    '  gl_Position = vec4(2.0 * xz * f / uW, 2.0 * yp * f / uH, zp * 0.045 - 0.9, 1.0);',
+    '  vColor = aColor;',
+    '}'
+  ].join('\n');
+
+  var FS = [
+    'precision mediump float;',
+    'varying vec3 vColor;',
+    'void main(){',
+    '  vec2 d = gl_PointCoord - vec2(0.5);',
+    '  float r2 = dot(d, d);',
+    '  if (r2 > 0.25) discard;',
+    '  float a = clamp((0.25 - r2) * 18.0, 0.0, 1.0);',    // 边缘抗锯齿，旋转不闪烁
+    '  gl_FragColor = vec4(vColor, a);',
+    '}'
+  ].join('\n');
+
+  function compile(type, src) {
+    var s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+    return s;
+  }
+
+  var U = {};
+  function initGL() {
+    var vs = compile(gl.VERTEX_SHADER, VS);
+    var fs = compile(gl.FRAGMENT_SHADER, FS);
+    var prog = gl.createProgram();
+    gl.attachShader(prog, vs);
+    gl.attachShader(prog, fs);
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+    gl.useProgram(prog);
+
+    var bufPos = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, bufPos);
+    gl.bufferData(gl.ARRAY_BUFFER, pos, gl.STATIC_DRAW);
+    var aPos = gl.getAttribLocation(prog, 'aPos');
+    gl.enableVertexAttribArray(aPos);
+    gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, 0, 0);
+
+    var bufCol = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, bufCol);
+    gl.bufferData(gl.ARRAY_BUFFER, col, gl.STATIC_DRAW);
+    var aColor = gl.getAttribLocation(prog, 'aColor');
+    gl.enableVertexAttribArray(aColor);
+    gl.vertexAttribPointer(aColor, 3, gl.UNSIGNED_BYTE, true, 0, 0);
+
+    U.cosA = gl.getUniformLocation(prog, 'uCosA');
+    U.sinA = gl.getUniformLocation(prog, 'uSinA');
+    U.cosP = gl.getUniformLocation(prog, 'uCosP');
+    U.sinP = gl.getUniformLocation(prog, 'uSinP');
+    U.camDist = gl.getUniformLocation(prog, 'uCamDist');
+    U.camHeight = gl.getUniformLocation(prog, 'uCamHeight');
+    U.w = gl.getUniformLocation(prog, 'uW');
+    U.h = gl.getUniformLocation(prog, 'uH');
+    U.ps = gl.getUniformLocation(prog, 'uPS');
+
+    gl.uniform1f(U.camDist, CAM_DIST);
+    gl.uniform1f(U.camHeight, CAM_HEIGHT);
+    gl.uniform1f(U.w, WIDTH);
+    gl.uniform1f(U.h, HEIGHT);
+    gl.uniform1f(U.cosP, Math.cos(PITCH));
+    gl.uniform1f(U.sinP, Math.sin(PITCH));
+
+    gl.clearColor(0, 0, 0, 1);
+    gl.enable(gl.DEPTH_TEST);
+    gl.depthFunc(gl.LEQUAL);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+  }
+
+  if (usingGL) {
+    try { initGL(); } catch (e) { usingGL = false; }
+  }
+
+  /* ================== 视口 / 自适应布局 ================== */
+  var vw = 1, vh = 1, dpr = 1;
+  var sceneX = 0, sceneY = 0, sceneW = 1, sceneH = 1, sceneK = 1;
+  var TEXT = { size: 74, x: 0, y: 0, align: 'left', maxW: 100 };
+
+  function layout() {
+    vw = Math.max(1, window.innerWidth);
+    vh = Math.max(1, window.innerHeight);
+    dpr = Math.min(window.devicePixelRatio || 1, DPR_CAP);
+
+    var bw = Math.round(vw * dpr), bh = Math.round(vh * dpr);
+    glCanvas.width = bw; glCanvas.height = bh;
+    fxCanvas.width = bw; fxCanvas.height = bh;
+
+    var boxW, boxH, portrait = (vw / vh) < 1.28;
+
+    if (!portrait) {
+      // 横屏 / 桌面：整幅 16:9 场景等比完整显示，文字排左侧
+      boxW = Math.min(vw, vh * 16 / 9);
+      boxH = boxW * 9 / 16;
+      sceneX = (vw - boxW) / 2;
+      sceneY = (vh - boxH) / 2;
+
+      TEXT.size = 74 * (boxW / WIDTH);
+      TEXT.x = sceneX + 78 * (boxW / WIDTH);
+      TEXT.y = sceneY + 332 * (boxW / WIDTH);
+      TEXT.align = 'left';
+      TEXT.maxW = 566 * (boxW / WIDTH);
+    } else {
+      // 竖屏：树体放大到接近满宽，两侧星空自然裁切；文字居中在上方
+      var visibleW = 720;                          // 可见的设计宽度
+      boxH = vw * (WIDTH / visibleW) * 9 / 16;
+      boxW = boxH * 16 / 9;
+
+      TEXT.size = Math.min(vw * 0.095, 52);
+      TEXT.y = 26 + TEXT.size * 0.85;
+      TEXT.x = vw / 2;
+      TEXT.align = 'center';
+      TEXT.maxW = vw * 0.9;
+
+      var top = TEXT.y + TEXT.size * 1.1;
+      var avail = vh - top - 16;
+      if (boxH > avail) { boxH = Math.max(60, avail); boxW = boxH * 16 / 9; }
+      sceneX = (vw - boxW) / 2;
+      sceneY = top + Math.max(0, (avail - boxH) * 0.25);
+    }
+
+    sceneW = boxW; sceneH = boxH; sceneK = boxW / WIDTH;
+
+    if (veil) {
+      veil.style.left = sceneX + 'px';
+      veil.style.top = (sceneY - 3) + 'px';
+      veil.style.width = boxW + 'px';
+      veil.style.height = (boxH + 6) + 'px';
+      if (portrait) {
+        veil.style.background = 'linear-gradient(to bottom, rgba(0,0,0,0) 0%, rgba(0,0,0,0) 76%, #000 96%, #000 100%)';
+        veil.style.opacity = '1';
+      } else {
+        veil.style.opacity = '0';
+      }
+    }
+
+    if (usingGL) {
+      gl.viewport(
+        Math.round(sceneX * dpr),
+        Math.round((vh - sceneY - boxH) * dpr),   // GL 原点在左下
+        Math.round(boxW * dpr),
+        Math.round(boxH * dpr)
+      );
+      gl.uniform1f(U.ps, sceneK * dpr);
+    } else if (cpu) {
+      cpu.ctx = glCanvas.getContext('2d');
+    }
+
+    renderText();
+  }
+
+  /* ================== 文字层 ================== */
+  var FONT_STACK = [
+    '"Ma Shan Zheng"',
+    '"STXingkai"', '"Xingkai SC"',
+    '"KaiTi"', '"STKaiti"', '"Kaiti SC"',
+    '"AR PL UKai CN"',
+    '"Noto Serif CJK SC"',
+    '"Songti SC"',
+    '"SimSun"',
+    'cursive', 'serif'
+  ].join(', ');
+
+  var textLayer = document.createElement('canvas');
+
+  function renderText() {
+    textLayer.width = Math.round(vw * dpr);
+    textLayer.height = Math.round(vh * dpr);
+    var t = textLayer.getContext('2d');
+
+    t.setTransform(1, 0, 0, 1, 0, 0);
+    t.clearRect(0, 0, textLayer.width, textLayer.height);
+    t.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    var size = TEXT.size;
+    t.font = size + 'px ' + FONT_STACK;
+    var w = t.measureText(GREETING).width;
+    if (w > TEXT.maxW && w > 0) {          // 自动缩放以适配留白
+      size = Math.max(10, Math.floor(size * TEXT.maxW / w));
+      t.font = size + 'px ' + FONT_STACK;
+    }
+
+    t.textBaseline = 'middle';
+    t.textAlign = TEXT.align;
+
+    // 柔光（一层冷白，尺度克制）
+    t.shadowColor = 'rgba(160, 195, 255, 0.5)';
+    t.shadowBlur = size * 0.2;
+    t.fillStyle = 'rgba(255, 255, 255, 0.45)';
+    t.fillText(GREETING, TEXT.x, TEXT.y);
+
+    // 字身（实心两遍，保证笔画锐利）
+    t.shadowBlur = 0;
+    t.fillStyle = '#ffffff';
+    t.fillText(GREETING, TEXT.x, TEXT.y);
+    t.fillText(GREETING, TEXT.x, TEXT.y);
+    t.shadowBlur = 0;
+  }
+
+  /* ================== 前景大雪花 ================== */
+  var snow = [];
+  function newFlake() {
+    var x = rnd(0, WIDTH), y = rnd(-80, -10);
+    var radius = rnd(10.0, 16.0), speed = rnd(30.0, 45.0);
+    var life = (HEIGHT + 80 - y) / speed;
+    return { x: x, y: y, r: radius, v: speed, life: life, maxLife: life };
+  }
+  for (var si = 0; si < SNOW2D_POINTS; si++) snow.push(newFlake());
+
+  function updateSnow(dt) {
+    for (var i = 0; i < snow.length; i++) {
+      var f = snow[i];
+      f.y += f.v * dt;
+      f.life -= dt;
+      if (f.life <= 0 || f.y > HEIGHT + 50) snow[i] = newFlake();
+    }
+  }
+
+  function drawSnow(ctx) {
+    for (var i = 0; i < snow.length; i++) {
+      var f = snow[i];
+      var phase = f.life / f.maxLife;
+      var alpha = phase > 0.3 ? 255 : Math.max(0, Math.min(255, Math.floor(255 * phase / 0.3)));
+
+      var rs = [f.r * 1.3, f.r * 1.0, f.r * 0.75, f.r * 0.55, f.r * 0.45];
+      var as = [alpha / 20, alpha / 12, alpha / 6, alpha / 3, alpha];
+      for (var k = 0; k < 5; k++) {
+        if (as[k] <= 0) continue;
+        ctx.fillStyle = 'rgba(255,255,255,' + (as[k] / 255) + ')';
+        ctx.beginPath();
+        ctx.arc(f.x, f.y, Math.max(1, rs[k]), 0, TAU);
+        ctx.fill();
+      }
+    }
+  }
+
+  /* ================== 无 WebGL 时的 Canvas2D 兜底 ================== */
+  var cpu = null;
+  if (!usingGL) {
+    cpu = { ctx: null, list: new Array(TOTAL) };
+  }
+
+  function drawCpu(angle) {
+    var ctx = cpu.ctx;
+    var cosA = Math.cos(angle), sinA = Math.sin(angle);
+    var cosP = Math.cos(PITCH), sinP = Math.sin(PITCH);
+    var list = cpu.list, arr = [];
+
+    for (var i = 0; i < TOTAL; i++) {
+      var i3 = i * 3;
+      var x = pos[i3], y = pos[i3 + 1], z = pos[i3 + 2];
+      var xz = x * cosA - z * sinA;
+      var zz = x * sinA + z * cosA;
+      var yp = y * cosP - zz * sinP - CAM_HEIGHT;
+      var zp = y * sinP + zz * cosP + CAM_DIST;
+      if (zp <= 0.1) { list[i] = null; continue; }
+      var f = (HEIGHT * 0.63) / zp;
+      list[i] = {
+        d: zp,
+        sx: WIDTH / 2 + xz * f,
+        sy: HEIGHT / 2 - yp * f,
+        s: Math.max(1, Math.floor(3.6 - zp * 0.13)),
+        c: i3
+      };
+      arr.push(list[i]);
+    }
+    arr.sort(function (a, b) { return b.d - a.d; });
+
+    for (var q = 0; q < arr.length; q++) {
+      var p = arr[q];
+      ctx.fillStyle = 'rgb(' + col[p.c] + ',' + col[p.c + 1] + ',' + col[p.c + 2] + ')';
+      ctx.beginPath();
+      ctx.arc(p.sx, p.sy, p.s, 0, TAU);
+      ctx.fill();
+    }
+  }
+
+  /* ================== 主循环 ================== */
+  var angle = 0.0, last = 0;
+  var stage = document.getElementById('stage');
+  var veil = document.getElementById('veil');
+
+  function frame(now) {
+    if (!last) last = now;
+    var dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+
+    updateSnow(dt);
+
+    if (usingGL) {
+      gl.uniform1f(U.cosA, Math.cos(angle));
+      gl.uniform1f(U.sinA, Math.sin(angle));
+      gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+      gl.drawArrays(gl.POINTS, 0, n);
+    } else if (cpu.ctx) {
+      cpu.ctx.setTransform(1, 0, 0, 1, 0, 0);
+      cpu.ctx.fillStyle = '#000';
+      cpu.ctx.fillRect(0, 0, glCanvas.width, glCanvas.height);
+      cpu.ctx.setTransform(sceneK * dpr, 0, 0, sceneK * dpr, sceneX * dpr, sceneY * dpr);
+      drawCpu(angle);
+    }
+
+    angle += 0.27 * dt;                    // 原版 0.0045/帧 @60fps 等价
+
+    // 前景层：文字 + 大雪花
+    var fx = fxCanvas.getContext('2d');
+    fx.setTransform(1, 0, 0, 1, 0, 0);
+    fx.clearRect(0, 0, fxCanvas.width, fxCanvas.height);
+    fx.drawImage(textLayer, 0, 0);
+    fx.setTransform(sceneK * dpr, 0, 0, sceneK * dpr, sceneX * dpr, sceneY * dpr);
+    drawSnow(fx);
+
+    requestAnimationFrame(frame);
+  }
+
+  var resizeTimer = 0;
+  window.addEventListener('resize', function () {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(layout, 120);
+  });
+  window.addEventListener('orientationchange', function () { setTimeout(layout, 200); });
+
+  layout();
+  requestAnimationFrame(function (t) {
+    stage.classList.add('on');
+    requestAnimationFrame(frame);
+  });
+
+  // 全屏切换（不留任何可见提示，按 F / 双击画面）
+  function toggleFull() {
+    if (document.fullscreenElement) document.exitFullscreen();
+    else if (stage.requestFullscreen) stage.requestFullscreen();
+  }
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'f' || e.key === 'F') toggleFull();
+  });
+  stage.addEventListener('dblclick', toggleFull);
+
+  // 书法字体就绪后重绘文字（失败则沿用系统字体回退）
+  if (document.fonts && document.fonts.load) {
+    document.fonts.load(96 + 'px "Ma Shan Zheng"', GREETING)
+      .then(renderText).catch(function () {});
+    if (document.fonts.ready) document.fonts.ready.then(renderText);
+  }
+
+  /* ================== 圣诞音乐（Web Audio 合成《Jingle Bells》，无外部音频） ================== */
+  var BEAT = 0.52;                       // 一拍时长（约 115 BPM）
+  var NC = { C5: 523.25, D5: 587.33, E5: 659.25, F5: 698.46, G5: 783.99 };
+  var MEL = [
+    [NC.E5,1],[NC.E5,1],[NC.E5,2],                                   // Jingle bells
+    [NC.E5,1],[NC.E5,1],[NC.E5,2],                                   // jingle bells
+    [NC.E5,1],[NC.G5,1],[NC.C5,1],[NC.D5,1],                          // jingle all the way
+    [NC.E5,4],
+    [NC.F5,1],[NC.F5,1],[NC.F5,1],[NC.F5,1],                          // Oh what fun
+    [NC.F5,1],[NC.E5,1],[NC.E5,1],[NC.E5,0.5],[NC.E5,0.5],
+    [NC.E5,1],[NC.D5,1],[NC.D5,1],[NC.E5,1],                          // one-horse open sleigh
+    [NC.D5,2],[NC.G5,2],
+    [NC.E5,1],[NC.E5,1],[NC.E5,2],
+    [NC.E5,1],[NC.E5,1],[NC.E5,2],
+    [NC.E5,1],[NC.G5,1],[NC.C5,1],[NC.D5,1],
+    [NC.E5,4],
+    [NC.F5,1],[NC.F5,1],[NC.F5,1],[NC.F5,1],
+    [NC.F5,1],[NC.E5,1],[NC.E5,1],[NC.E5,0.5],[NC.E5,0.5],
+    [NC.G5,1],[NC.G5,1],[NC.F5,1],[NC.D5,1],
+    [NC.C5,4],
+    [null,1],[null,1],[null,1],[null,1]                               // 循环前留一口气
+  ];
+
+  var music = {
+    ctx: null, master: null, bus: null, conv: null, wet: null, noise: null,
+    on: false, ready: false, next: 0, step: 0, timer: 0
+  };
+  var mbtn = document.getElementById('mbtn');
+
+  function makeNoise(ctx, sec) {
+    var len = Math.floor(ctx.sampleRate * sec);
+    var buf = ctx.createBuffer(1, len, ctx.sampleRate);
+    var d = buf.getChannelData(0);
+    for (var i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+    return buf;
+  }
+
+  function makeIR(ctx, sec) {
+    var len = Math.floor(ctx.sampleRate * sec);
+    var buf = ctx.createBuffer(1, len, ctx.sampleRate);
+    var d = buf.getChannelData(0);
+    for (var i = 0; i < len; i++) {
+      var t = i / len;
+      d[i] = (Math.random() * 2 - 1) * Math.pow(1 - t, 3) * 0.5;
+    }
+    return buf;
+  }
+
+  function initAudio() {
+    var AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return false;
+    var ctx = new AC();
+
+    music.master = ctx.createGain();
+    music.master.gain.value = 0.0001;
+    music.master.connect(ctx.destination);
+
+    music.bus = ctx.createGain();          // 干声总线
+    music.bus.gain.value = 0.55;
+    music.bus.connect(music.master);
+
+    music.conv = ctx.createConvolver();    // 一点点厅堂混响，让合成音不干
+    music.conv.buffer = makeIR(ctx, 1.2);
+    music.wet = ctx.createGain();
+    music.wet.gain.value = 0.32;
+    music.conv.connect(music.wet);
+    music.wet.connect(music.master);
+    music.bus.connect(music.conv);
+
+    music.noise = makeNoise(ctx, 0.4);
+    music.ctx = ctx;
+    music.ready = true;
+    return true;
+  }
+
+  // 主旋律音：三角波 + 高八度正弦，短促衰减，像铃铛/钢琴
+  function tone(freq, when, dur, vol) {
+    var ctx = music.ctx;
+    var g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, when);
+    g.gain.exponentialRampToValueAtTime(vol, when + 0.02);
+    g.gain.exponentialRampToValueAtTime(0.0001, when + dur);
+
+    var o1 = ctx.createOscillator();
+    o1.type = 'triangle';
+    o1.frequency.value = freq;
+
+    var o2 = ctx.createOscillator();
+    o2.type = 'sine';
+    o2.frequency.value = freq * 2;
+    var g2 = ctx.createGain();
+    g2.gain.value = 0.18;
+
+    o1.connect(g);
+    o2.connect(g2);
+    g2.connect(g);
+    g.connect(music.bus);
+
+    o1.start(when); o1.stop(when + dur + 0.02);
+    o2.start(when); o2.stop(when + dur + 0.02);
+  }
+
+  // 雪橇铃：噪声瞬态 + 高频金属音
+  function bell(when, vol) {
+    var ctx = music.ctx;
+
+    var src = ctx.createBufferSource();
+    src.buffer = music.noise;
+    var bp = ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.frequency.value = 5400;
+    bp.Q.value = 1.3;
+    var g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, when);
+    g.gain.exponentialRampToValueAtTime(vol, when + 0.006);
+    g.gain.exponentialRampToValueAtTime(0.0001, when + 0.13);
+    src.connect(bp); bp.connect(g); g.connect(music.bus);
+    src.start(when); src.stop(when + 0.16);
+
+    var o = ctx.createOscillator();
+    o.type = 'sine';
+    o.frequency.value = 3980;
+    var g2 = ctx.createGain();
+    g2.gain.setValueAtTime(0.0001, when);
+    g2.gain.exponentialRampToValueAtTime(vol * 0.55, when + 0.008);
+    g2.gain.exponentialRampToValueAtTime(0.0001, when + 0.1);
+    o.connect(g2); g2.connect(music.bus);
+    o.start(when); o.stop(when + 0.12);
+  }
+
+  function pump() {
+    if (!music.on) return;
+    var ctx = music.ctx;
+    while (music.next < ctx.currentTime + 0.3) {
+      var it = MEL[music.step % MEL.length];
+      var t = music.next;
+      var dur = it[1] * BEAT;
+      if (it[0]) tone(it[0], t, Math.min(dur * 1.7, 1.3), 0.16);
+      for (var b = 0; b < it[1]; b += 1) bell(t + b * BEAT, b === 0 ? 0.05 : 0.032);
+      music.next = t + dur;
+      music.step++;
+    }
+  }
+
+  function setUI(on) {
+    if (!mbtn) return;
+    if (on) mbtn.classList.add('playing');
+    else mbtn.classList.remove('playing');
+    mbtn.setAttribute('aria-label', on ? '关闭圣诞音乐' : '播放圣诞音乐');
+  }
+
+  function startMusic() {
+    if (!music.ready && !initAudio()) return;
+    if (music.on) return;
+    var ctx = music.ctx;
+    if (ctx.state === 'suspended') ctx.resume();
+
+    music.on = true;
+    music.step = 0;
+    music.next = ctx.currentTime + 0.05;
+    music.master.gain.cancelScheduledValues(ctx.currentTime);
+    music.master.gain.setValueAtTime(0.0001, ctx.currentTime);
+    music.master.gain.exponentialRampToValueAtTime(0.6, ctx.currentTime + 0.8);
+
+    pump();
+    clearInterval(music.timer);
+    music.timer = setInterval(pump, 70);
+    setUI(true);
+  }
+
+  function stopMusic() {
+    if (!music.on) return;
+    music.on = false;
+    clearInterval(music.timer);
+    music.timer = 0;
+    var ctx = music.ctx;
+    music.master.gain.cancelScheduledValues(ctx.currentTime);
+    music.master.gain.setValueAtTime(music.master.gain.value, ctx.currentTime);
+    music.master.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.35);
+    setTimeout(function () {
+      if (!music.on && music.ctx && music.ctx.state === 'running') music.ctx.suspend();
+    }, 420);
+    setUI(false);
+  }
+
+  // 首次点击/按键即自动起音乐（浏览器要求必须有用户手势）
+  window.addEventListener('pointerdown', function (e) {
+    if (mbtn && mbtn.contains(e.target)) return;   // 按钮自己做开关
+    startMusic();
+  }, { capture: true, once: true });
+  window.addEventListener('keydown', function (e) {
+    if (e.key === 'f' || e.key === 'F') return;
+    startMusic();
+  }, { capture: true, once: true });
+
+  if (mbtn) {
+    mbtn.addEventListener('click', function (e) {
+      e.stopPropagation();
+      if (music.on) stopMusic(); else startMusic();
+    });
+    mbtn.addEventListener('dblclick', function (e) { e.stopPropagation(); });
+  }
+
+  // 切到后台时静音，回到前台自动续上（省电，也不会在后台乱响）
+  var musicWasOn = false;
+  document.addEventListener('visibilitychange', function () {
+    if (!music.ready) return;
+    if (document.hidden) {
+      if (music.on) { musicWasOn = true; stopMusic(); }
+    } else if (musicWasOn) {
+      musicWasOn = false;
+      startMusic();
+    }
+  });
+
+})();
+</script>
+</body>
+</html>
